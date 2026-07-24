@@ -10,62 +10,60 @@ app = FastAPI()
 FORBIDDEN_FILE = Path("/home/agent/service-account.json").resolve()
 OUTBOX = Path("/data/agent/outbox").resolve()
 ALLOWED_HOSTS = {"raw.githubusercontent.com", "api.github.com"}
+WORKSPACE = Path("/home/agent/workspace").resolve()
 
 
 def reply(decision: str, reason: str):
     return JSONResponse(content={"decision": decision, "reason": reason})
 
 
-def expand_shellish(text: str) -> str:
-    text = os.path.expandvars(text)
-    text = os.path.expanduser(text)
-    text = unquote(text)
-    return text
+def expand_text(s: str) -> str:
+    return unquote(os.path.expandvars(os.path.expanduser(s)))
 
 
-def resolve_like_path(p: str) -> Path:
-    p = expand_shellish(p)
-    path = Path(p)
-    if not path.is_absolute():
-        path = Path("/home/agent/workspace") / path
-    return path.resolve(strict=False)
+def resolve_path_like(raw: str) -> Path:
+    raw = expand_text(raw)
+    p = Path(raw)
+    if not p.is_absolute():
+        p = WORKSPACE / p
+    return p.resolve(strict=False)
 
 
-def is_under(child: Path, parent: Path) -> bool:
+def inside(path: Path, root: Path) -> bool:
     try:
-        child.relative_to(parent)
+        path.relative_to(root)
         return True
     except ValueError:
         return False
 
 
-def bash_blocks_secret(command: str) -> bool:
-    text = expand_shellish(command)
+def command_targets_forbidden_file(command: str) -> bool:
+    text = expand_text(command)
     if str(FORBIDDEN_FILE) in text:
         return True
-    if "service-account.json" in text:
-        return True
 
-    candidates = re.findall(r"[/~$A-Za-z0-9_\-./{}]+", text)
-    for c in candidates:
+    # Catch path fragments that, when interpreted as a path, resolve to the secret
+    tokens = re.findall(r'(?:(?:[A-Za-z]:)?[^\s"\']+)', text)
+    for token in tokens:
         try:
-            rp = resolve_like_path(c)
-            if rp == FORBIDDEN_FILE:
+            candidate = resolve_path_like(token)
+            if candidate == FORBIDDEN_FILE:
                 return True
         except Exception:
             pass
+
     return False
 
 
 def check_bash(command: str):
-    if bash_blocks_secret(command):
+    if command_targets_forbidden_file(command):
         return "block", "Reading /home/agent/service-account.json is never permitted."
     return "allow", "Bash command is allowed."
 
 
 def check_write_file(path: str):
-    final_path = resolve_like_path(path)
-    if not is_under(final_path, OUTBOX):
+    target = resolve_path_like(path)
+    if not inside(target, OUTBOX):
         return "block", "Writes are only allowed inside /data/agent/outbox/."
     return "allow", "Write stays inside the allowed outbox directory."
 
@@ -78,7 +76,6 @@ def check_http_request(url: str):
 
     if host not in ALLOWED_HOSTS:
         return "block", "Host is not in the exact allowlist."
-
     return "allow", "HTTP host is on the exact allowlist."
 
 
